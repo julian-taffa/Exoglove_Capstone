@@ -55,7 +55,7 @@ FlexCAN_T4<CAN1, RX_SIZE_256, TX_SIZE_16> Can1;  // These Maxon components use t
 #define MODES_OF_OPERATION_INDEX 0x6060
 #define MODES_OF_OPERATION_SUBINDEX 0x00
 #define PROFILE_POSITION_MODE 1
-#define CYCLIC_SYNCHRONOUS_POSITION_MODE 8 
+#define CYCLIC_SYNCHRONOUS_POSITION_MODE 8
 
 // For the Statusword
 #define SDO_READ_STATUSWORD_INDEX 0x6041
@@ -81,17 +81,23 @@ FlexCAN_T4<CAN1, RX_SIZE_256, TX_SIZE_16> Can1;  // These Maxon components use t
 #define ERROR_CODE_SUBINDEX 0x00
 
 // For SYNC
-#define SYNC_COB_ID 0x80;
+#define SYNC_COB_ID 0x80
+
+// Maximal Following Error
+#define MAXIMAL_FOLLOWING_ERROR_INDEX 0x6065
+#define MAXIMAL_FOLLOWING_ERROR_SUBINDEX 0x00
 
 /// USER-ADJUSTABLE PARAMETERS ///
 
 const int32_t errorValue = 200000;     // Return value if unable to read a proper position
 const unsigned long timeout = 100;     // Timeout in milliseconds waiting for CAN message
 const unsigned long syncPeriod = 100;  // SYNC period in milliseconds
-const int32_t homingIncrement = 1000;  // Increment of steps for homing sequence
-const int32_t motorTravel = 120000;    // Number of increments from extreme to extreme
+const int32_t homingIncrement = 2000;  // Increment of steps for homing sequence
+const int32_t motorTravel = 135000;    // Number of increments from extreme to extreme
 
-int32_t motorZeroPoint[6];  // Array has 6 elements, but element 0 will be ignored. Elements 1 to 5 will be each motor
+
+int32_t motorZeroPoint[6];     // Array has 6 elements, but element 0 will be ignored. Elements 1 to 5 will be each motor
+int32_t motorMaximumPoint[6];  // Array has 6 elements, but element 0 will be ignored. Elements 1 to 5 will be each motor
 
 // This enum makes the particular finger being referred to easier to read in code
 enum Fingers {
@@ -109,9 +115,16 @@ enum ControlwordCommand {
   SWITCH_ON_AND_ENABLE_OPERATION = 0x0F,  // 0b00001111
   DISABLE_VOLTAGE = 0x00,                 // 0b00000000
   QUICK_STOP = 0x02,                      // 0b00000010
-  DISABLE_OPERATION = 0x07,               // 0b00000111
   ENABLE_OPERATION = 0x0F,                // 0b00001111
   FAULT_RESET = 0x80                      // 0b10000000
+};
+
+enum ProfilePositionControlwords {
+  ABSOLUTE_POSITION = 0x001F,
+  ABSOLUTE_POSITION_IMMEDIATE = 0x003F,
+  RELATIVE_POSITION = 0x007F,
+  RELATIVE_POSTION_IMMEDIATE = 0x005F,
+  NEW_POSITION = 0x000F,  // Toggle 'New Position'
 };
 
 // This enum collects all of the relevant Statuswords together
@@ -136,6 +149,22 @@ void sendNMT(uint8_t nodeID, uint8_t command) {
   Can1.write(msg);
 }
 
+void resetMotor(uint8_t nodeID, uint8_t modeOfOperation) {
+  writeControlwordSDO(nodeID, SHUTDOWN);                             // Transitions to "Ready To Switch On" state
+  delay(20);                                                         // Delay to ensure command is processed
+  setModeOfOperation(nodeID, modeOfOperation);                       // set mode
+  delay(20);                                                         // Delay to ensure command is procesed
+  if (modeOfOperation == PROFILE_POSITION_MODE) {                    // If Profile Position Mode is selected
+    writeControlwordSDO(nodeID, SWITCH_ON);                          // Transitions to "Switched On" state
+    delay(20);                                                       // Delay to ensure command is processed
+    writeControlwordSDO(nodeID, ENABLE_OPERATION);                   // Transitions to "Operation Enabled" state
+    delay(20);                                                       // Delay to ensure command is processed
+  } else if (modeOfOperation == CYCLIC_SYNCHRONOUS_POSITION_MODE) {  // If Cyclic Synchronous Position Mode is selected
+    writeControlwordSDO(nodeID, 0x0B);                               // write the correct Controlword
+    delay(20);                                                       // Delay to ensure command is processed
+  }
+}
+
 // This function reads the Statusword from a given motor driver
 uint16_t readStatusword(uint8_t nodeID) {
   uint8_t sdoReadCommand[8] = {
@@ -153,8 +182,8 @@ uint16_t readStatusword(uint8_t nodeID) {
 
   // Send the SDO read command
   if (Can1.write(outMsg)) {
-    Serial.print("Sent Statusword read request to motor driver with Node-ID: ");
-    Serial.println(nodeID);
+    //Serial.print("Sent Statusword read request to motor driver with Node-ID: ");
+    //Serial.println(nodeID);
   } else {
     Serial.print("Failed to send Statusword read request to motor driver with Node-ID: ");
     Serial.println(nodeID);
@@ -171,7 +200,9 @@ uint16_t readStatusword(uint8_t nodeID) {
       if (inMsg.buf[1] == (uint8_t)(SDO_READ_STATUSWORD_INDEX & 0xFF) && inMsg.buf[2] == (uint8_t)(SDO_READ_STATUSWORD_INDEX >> 8) && inMsg.buf[3] == SDO_READ_STATUSWORD_SUBINDEX) {
         // Construct the Statusword from the response bytes (it will be 16-bit)
         uint16_t statusword = inMsg.buf[4] | (inMsg.buf[5] << 8);
-        Serial.print("Statusword: ");
+        Serial.print("Node ");
+        Serial.print(nodeID);
+        Serial.print(" Statusword: ");
         Serial.println(statusword, BIN);
         return statusword;  // Return the Statusword value
       }
@@ -185,7 +216,7 @@ uint16_t readStatusword(uint8_t nodeID) {
 }
 
 // This function writes to the Controlword, to enable the motor, switch on and enable operation
-void writeControlword(uint8_t nodeID, uint16_t controlword) {
+void writeControlwordSDO(uint8_t nodeID, uint16_t controlword) {
   uint8_t sdoWriteCommand[8] = {
     0x2B,                                           // SDO command specifier for writing 2 bytes
     (uint8_t)(SDO_WRITE_CONTROLWORD_INDEX & 0xFF),  // Index LowByte
@@ -202,8 +233,8 @@ void writeControlword(uint8_t nodeID, uint16_t controlword) {
   memcpy(outMsg.buf, sdoWriteCommand, 8);
 
   if (Can1.write(outMsg)) {
-    Serial.print("Controlword written to motor driver with Node-ID: ");
-    Serial.println(nodeID);
+    //Serial.print("Controlword written to motor driver with Node-ID: ");
+    //Serial.println(nodeID);
 
     // Now waiting for the confirmation
     CAN_message_t inMsg;
@@ -213,7 +244,7 @@ void writeControlword(uint8_t nodeID, uint16_t controlword) {
       if (Can1.read(inMsg) && inMsg.id == (SDO_SERVER_TO_CLIENT_BASE + nodeID)) {
         // Check if the received message is the SDO write confirmation
         if (inMsg.buf[0] == SDO_WRITE_CONFIRMATION_COMMAND && inMsg.buf[1] == (uint8_t)(SDO_WRITE_CONTROLWORD_INDEX & 0xFF) && inMsg.buf[2] == (uint8_t)(SDO_WRITE_CONTROLWORD_INDEX >> 8) && inMsg.buf[3] == SDO_WRITE_CONTROLWORD_SUBINDEX) {
-          Serial.println("Controlword write confirmation received.");
+          //Serial.println("Controlword write confirmation received.");
           return true;  // Write confirmation received, operation successful
         }
       }
@@ -289,15 +320,9 @@ void setup() {
 
   for (int i = THUMB; i <= PINKIE; ++i) {
     // Transition to "Ready to Switch On"
-    writeControlword(i, 0x0006);  // write the Ready to Switch On controlword
-    delay(100);                   // Delay to ensure command is processed
-
-    // Transition to Switched on and Enable Operation
-    writeControlword(i, SWITCH_ON_AND_ENABLE_OPERATION);  // Enable all motors by setting the 'Switch On and Enable Operation' state via the Controlword
-    delay(100);                                           // Delay to ensure command is processed
+    resetMotor(i, PROFILE_POSITION_MODE);  // prepare all motors, putting them in Profile Position Mode
 
     // Verify if motor is in the 'Operation enabled' state
-
     if (isMotorReady(readStatusword(i))) {
       Serial.print("Motor ");
       Serial.print(i);
@@ -309,31 +334,98 @@ void setup() {
     }
   }
 
+  // Complete Homing process for each one of the motors
   for (int i = THUMB; i <= PINKIE; ++i) {
     Serial.print("Motor ");
     Serial.print(i);
     Serial.println(" is beginning Homing Sequence.");
+    resetMotor(i, PROFILE_POSITION_MODE);
     homingSequence(i);  // run the Homing Sequence for this motor
+    //homingSequenceFast(i);
     Serial.println("Homing sequence complete!");
-    if (setModeOfOperation(i, CYCLIC_SYNCHRONOUS_POSITION_MODE)) {
-      Serial.println(" is in CSP Mode!");
-    } else {
-      Serial.println(" is not in CSP Mode.");
-    }
+    motorMaximumPoint[i] = motorZeroPoint[i] - motorTravel;  // enable the maximum point for each motor, direction is negative
+    Serial.print("Max position for Motor ");
+    Serial.print(i);
+    Serial.print(" set to ");
+    Serial.println(motorMaximumPoint[i]);
+    setMaximalFollowingError(i, 150000);              // set a very large following error so that
+    resetMotor(i, CYCLIC_SYNCHRONOUS_POSITION_MODE);  // get the motor ready for CSP mode
   }
 
+  // This loop runs through the state machine so each motor is functional in CSP mode
+  for (int i = THUMB; i <= PINKIE; ++i) {
+    readModeOfOperationSDO(i);
+    delay(50);
+    readStatusword(i);
+    delay(50);
+    writeControlwordSDO(i, SHUTDOWN);  // Transitions to "Ready To Switch On" state
+    delay(20);
+    writeControlwordSDO(i, SWITCH_ON);  // Transitions to "Switched On" state
+    delay(20);
+    writeControlwordSDO(i, ENABLE_OPERATION);  // Transitions to "Operation Enabled" state
+    delay(20);
+    writeTargetPositionPDO(i, motorMaximumPoint[i] + 5000);
+    delay(50);
+    readStatusword(i);
+    delay(50);
+    Serial.print("Target Position: ");
+    Serial.println(readTargetPositionSDO(i));
+    delay(50);
+    writeTargetPositionSDO(i, motorMaximumPoint[i]);
+    delay(50);
+    readStatusword(i);
+    delay(50);
+    Serial.print("Target Position: ");
+    Serial.println(readTargetPositionSDO(i));
+    delay(50);
+  }
 
 }  // Setup complete
 
-//// Old Setup Code Start
-// Set to CANopen standard 11-bit (not extended) frames
-//Can1.setTX();                  // set Transmission mode
-//Can1.setMBFilter(REJECT_ALL);  // Start by rejecting all frames
-//Can1.setMBFilter(FIFO, 0);     // Accept all standard IDs
-//Can1.enableFIFO();
-//Can1.onReceive(onReceive);
-//Can1.mailboxStatus();
-//// Old Setup Code end
+void loop() {
+  static unsigned long lastSyncTime = 0;
+  unsigned long currentTime = millis();
+
+  if (currentTime - lastSyncTime >= syncPeriod) {
+    lastSyncTime = currentTime;  // Update the last sync time
+
+    // Create a CAN message for the SYNC
+    CAN_message_t syncMsg;
+    syncMsg.id = SYNC_COB_ID;
+    syncMsg.len = 0;  // SYNC messages have no data
+
+    // Send the SYNC message
+    if (!Can1.write(syncMsg)) {  // if the SYNC fails
+      Serial.println("SYNC failed.");
+    }
+  }
+
+  cycleMotorPositions();
+}
+
+void cycleMotorPositions() {
+  static unsigned long lastActionTime = 0;
+  static uint8_t currentMotor = 1;
+  static bool moveToPositionB = false;
+
+  unsigned long currentTime = millis();
+
+  // Check if it's time to actuate the next motor
+  if (currentTime - lastActionTime >= 200) {
+    lastActionTime = currentTime;  // Update the last action time
+    // Determine the target position based on the toggle state
+    int32_t targetPosition = moveToPositionB ?  motorMaximumPoint[currentMotor] + 2000 : motorZeroPoint[currentMotor] - 2000;
+    // Actuate the current motor
+    //writeTargetPositionPDO(currentMotor, targetPosition);
+    writeTargetPositionSDO(currentMotor, targetPosition);
+
+    // Prepare for the next motor
+    if (++currentMotor > 5) {
+      currentMotor = 1;                    // Reset to the first motor
+      moveToPositionB = !moveToPositionB;  // Toggle between Position A and B
+    }
+  }
+}
 
 // Function to read current position of motor through SDO
 int32_t readMotorPositionSDO(uint8_t nodeID) {
@@ -350,9 +442,10 @@ int32_t readMotorPositionSDO(uint8_t nodeID) {
   memcpy(outMsg.buf, sdoReadCommand, 8);           // Copy the SDO command
 
   // Send the SDO read command
-  Can1.write(outMsg);
-  Serial.print("Sent SDO read position request to motor driver with Node-ID: ");
-  Serial.println(nodeID);
+  if (!Can1.write(outMsg)) {
+    Serial.print("SDO read position request FAILED for motor driver with Node-ID: ");
+    Serial.println(nodeID);
+  }
 
   // Now waiting for the response
   CAN_message_t inMsg;
@@ -364,10 +457,6 @@ int32_t readMotorPositionSDO(uint8_t nodeID) {
       if (inMsg.buf[1] == (uint8_t)(SDO_READ_POSITION_INDEX & 0xFF) && inMsg.buf[2] == (uint8_t)(SDO_READ_POSITION_INDEX >> 8)) {
         // Assuming the data is 32-bit, construct the position from the response bytes
         int32_t position = inMsg.buf[4] | (inMsg.buf[5] << 8) | (inMsg.buf[6] << 16) | (inMsg.buf[7] << 24);
-        Serial.print("Received position from Node-ID ");
-        Serial.print(nodeID);
-        Serial.print(": ");
-        Serial.println(position);
         return position;  // Return the position value
       }
     }
@@ -503,6 +592,86 @@ bool writeTargetPositionSDO(uint8_t nodeID, int32_t targetPosition) {
   }
 }
 
+bool setMaximalFollowingError(uint8_t nodeID, uint32_t followingError) {
+  if (nodeID < 1 || nodeID > 5) {
+    Serial.println("Invalid Motor ID. Only select motor from 1 to 5 inclusive");
+    return false;
+  }
+
+  uint8_t sdoWriteCommand[8] = {
+    //SDO_WRITE_POSITION_COMMAND,
+    0x23,
+    (uint8_t)(MAXIMAL_FOLLOWING_ERROR_INDEX & 0xFF),  // Index LowByte
+    (uint8_t)(MAXIMAL_FOLLOWING_ERROR_INDEX >> 8),    // Index HighByte
+    MAXIMAL_FOLLOWING_ERROR_SUBINDEX,                 // Subindex
+    (uint8_t)(followingError & 0xFF),                 //  LowByte
+    (uint8_t)((followingError >> 8) & 0xFF),          // MidLowByte
+    (uint8_t)((followingError >> 16) & 0xFF),         // MidHighByte
+    (uint8_t)((followingError >> 24) & 0xFF)          // HighByte
+  };
+
+  CAN_message_t outMsg;
+  outMsg.id = SDO_CLIENT_TO_SERVER_BASE + nodeID;
+  outMsg.len = 8;
+  memcpy(outMsg.buf, sdoWriteCommand, 8);
+
+  // Send the SDO write command
+  if (Can1.write(outMsg)) {
+    Serial.print("Sent maxFollowingError write request to Node-ID: ");
+    Serial.print(nodeID);
+    Serial.print(" to error of: ");
+    Serial.println(followingError);
+
+    // Wait for the SDO write confirmation
+    CAN_message_t inMsg;
+    unsigned long timeout = millis() + 1000;  // Set a 1-second timeout for the response
+
+    while (millis() < timeout) {
+      if (Can1.read(inMsg) && inMsg.id == (SDO_SERVER_TO_CLIENT_BASE + nodeID)) {
+        // Check if the received message is an SDO write confirmation
+        if (inMsg.buf[0] == SDO_WRITE_CONFIRMATION_COMMAND && inMsg.buf[1] == (uint8_t)(MAXIMAL_FOLLOWING_ERROR_INDEX & 0xFF) && inMsg.buf[2] == (uint8_t)(MAXIMAL_FOLLOWING_ERROR_INDEX >> 8)) {
+          Serial.println("SDO write confirmation received.");
+          return true;  // SDO write was successful
+        }
+      }
+    }
+    Serial.println("SDO write confirmation not received.");
+    return false;  // SDO write was not confirmed
+  } else {
+    Serial.print("Failed to set maxFollowingError to node ");
+    Serial.println(nodeID);
+    return false;
+  }
+}
+
+bool writeControlWordPDO(uint8_t nodeID, uint16_t Controlword) {
+  if (nodeID < 1 || nodeID > 5) {
+    Serial.println("Invalid Motor ID. Only select motor from 1 to 5 inclusive");
+    return false;
+  }
+
+  // Assign the correct COB-ID
+  uint32_t ControlwordCOBID = 0x00000200 + nodeID;
+
+  // Create a new CAN message
+  CAN_message_t msg;
+  msg.id = ControlwordCOBID;
+  msg.len = 2;  // 16-bit data
+  msg.buf[0] = Controlword & 0xFF;
+  msg.buf[1] = (Controlword >> 8) & 0xFF;
+
+  // Try to send the CAN message
+  if (Can1.write(msg)) {
+    Serial.print("controlword PDO sent to node ");
+    Serial.println(nodeID);
+    return true;
+  } else {
+    Serial.print("Failed to send controlword PDO to node ");
+    Serial.println(nodeID);
+    return false;
+  }
+}
+
 int32_t readTargetPositionSDO(uint8_t nodeID) {
   uint8_t sdoReadCommand[8] = {
     SDO_READ_COMMAND,
@@ -518,9 +687,10 @@ int32_t readTargetPositionSDO(uint8_t nodeID) {
   memcpy(outMsg.buf, sdoReadCommand, 8);           // Copy the SDO command into the message buffer
 
   // Send the SDO read command
-  Can1.write(outMsg);
-  Serial.print("Sent SDO read target position request to motor driver with Node-ID: ");
-  Serial.println(nodeID);
+  if (!Can1.write(outMsg)) {
+    Serial.print("SDO read target position request FAILED for motor driver with Node-ID: ");
+    Serial.println(nodeID);
+  }
 
   // Now waiting for the response
   CAN_message_t inMsg;
@@ -532,23 +702,20 @@ int32_t readTargetPositionSDO(uint8_t nodeID) {
       if (inMsg.buf[1] == (uint8_t)(SDO_WRITE_TARGET_POSITION_INDEX & 0xFF) && inMsg.buf[2] == (uint8_t)(SDO_WRITE_TARGET_POSITION_INDEX >> 8)) {
         // Construct the target position from the response bytes (assuming the data is a 32-bit integer)
         int32_t targetPosition = inMsg.buf[4] | (inMsg.buf[5] << 8) | (inMsg.buf[6] << 16) | (inMsg.buf[7] << 24);
-        Serial.print("Received target position from Node-ID ");
-        Serial.print(nodeID);
-        Serial.print(": ");
-        Serial.println(targetPosition);
         return targetPosition;  // Return the target position value
       }
     }
   }
 
   // If this point is ever reached, the response was not received in time
-  Serial.print("Response from Node-ID ");
+  Serial.print("Target Position Response from Node-ID ");
   Serial.print(nodeID);
   Serial.println(" was not received in time.");
   return errorValue;  // Return an error value to indicate no position was received
 }
 
-int8_t readModeOfOperation(uint8_t nodeID) {
+
+int8_t readModeOfOperationSDO(uint8_t nodeID) {
   uint8_t sdoReadCommand[8] = {
     SDO_READ_COMMAND,
     (uint8_t)(MODES_OF_OPERATION_INDEX & 0xFF),  // Index LowByte
@@ -593,6 +760,153 @@ int8_t readModeOfOperation(uint8_t nodeID) {
   return errorValue;  // Return an error value
 }
 
+// Function to clear errors on motors
+void cleanErrorState(uint8_t nodeID) {
+  writeControlwordSDO(nodeID, FAULT_RESET);   // Set bit 7 in the Controlword to reset the fault
+  delay(100);                                 // Small delay to ensure the command is processed
+  resetMotor(nodeID, PROFILE_POSITION_MODE);  // put the motor back into Profile Position Mode
+  delay(100);                                 // Small delay to ensure the command is processed
+
+  // Confirm that the error is cleared by checking the Statusword
+  uint16_t statusword = readStatusword(nodeID);
+  if (!(statusword & 0x0008)) {  // Bit 3 (0x08) is the fault bit in Statusword
+    Serial.println("Fault reset successful!");
+  } else {
+    Serial.println("Fault reset failed. Fault still present.");
+  }
+}
+
+// Function used during Homing sequence to handle the error at the base of the travel
+bool handleFollowingError(uint8_t nodeID, int32_t currentPosition) {
+  // Check the drive's status to determine if a following error has occurred
+  uint16_t statusword = readStatusword(nodeID);
+  if (statusword & FAULT_MASK) {
+    Serial.println("Following error detected, handling error.");
+
+    cleanErrorState(nodeID);  // Attempt to clear the error
+
+    // Read the status word again to check if the error has been cleared
+    statusword = readStatusword(nodeID);
+    if (statusword & FAULT_MASK) {
+      Serial.println("Failed to clear the following error.");
+      return false;  // the error was not handled correctly
+    }
+
+    motorZeroPoint[nodeID] = currentPosition - 2000;  // save the Zero (Home) point of the motor as 2000 increments from total travel
+
+    if (!setHomePosition(nodeID, motorZeroPoint[nodeID])) {  // Then, update 2000 increments in from the current position to be the new Zero (Home) Position
+      return false;                                          // tell the system that the reset of home was unsuccessful
+    }
+    moveToPosition(nodeID, motorZeroPoint[nodeID]);  // move the motor to its new Zero (Home) point
+    Serial.print("Zero (Home) for Node ");
+    Serial.print(nodeID);
+    Serial.print(" set at: ");
+    Serial.println(motorZeroPoint[nodeID]);
+    return true;  // if it all went fine, return success
+  } else {        // if no error was detected
+    Serial.println("No following error detected.");
+    return true;
+  }
+}
+
+// Function to set the Home position
+bool setHomePosition(uint8_t nodeID, int32_t desiredHomePosition) {
+  uint8_t sdoWriteCommand[8] = {
+    0x23,                                           // Command specifier for writing 4 bytes (0x23 for 32-bit, 0x2B for 16-bit, 0x2F for 8-bit)
+    (uint8_t)(HOME_POSITION_INDEX & 0xFF),          // Index LowByte
+    (uint8_t)(HOME_POSITION_INDEX >> 8),            // Index HighByte
+    HOME_POSITION_SUBINDEX,                         // Subindex
+    (uint8_t)(desiredHomePosition & 0xFF),          // Data LowByte
+    (uint8_t)((desiredHomePosition >> 8) & 0xFF),   // Data Low MidByte
+    (uint8_t)((desiredHomePosition >> 16) & 0xFF),  // Data High MidByte
+    (uint8_t)(desiredHomePosition >> 24)            // Data HighByte
+  };
+
+  CAN_message_t outMsg;
+  outMsg.id = SDO_CLIENT_TO_SERVER_BASE + nodeID;  // Add the node ID to the base Rx SDO ID
+  outMsg.len = 8;
+  memcpy(outMsg.buf, sdoWriteCommand, 8);
+
+  if (Can1.write(outMsg)) {
+    Serial.print("Home position set for motor with Node-ID: ");
+    Serial.println(nodeID);
+    return true;  // Success
+  } else {
+    Serial.print("Failed to set home position for motor with Node-ID: ");
+    Serial.println(nodeID);
+    return false;  // Failure
+  }
+}
+
+// The primary Homing Sequence per motor
+void homingSequence(uint8_t nodeID) {
+  // Set the correct mode, in this case Profile Position Mode makes the most sense.
+  // setModeOfOperation(nodeID, PROFILE_POSITION_MODE);
+  // Serial.print("PROFILE POSITION MODE requested on Motor ");
+  // Serial.println(nodeID);
+  // delay(500);                                        // Short delay to ensure motor is in correct mode
+  int8_t currentMode = readModeOfOperationSDO(nodeID);  // read the current mode of operation
+  delay(500);
+  uint16_t statuswordCurrent = readStatusword(nodeID);
+
+  // Command the motor to move slowly in the positive direction
+  setMaximalFollowingError(nodeID, 102);  // set the initial following error at 10% of the encoder resolution
+  int32_t currentPosition = readMotorPositionSDO(nodeID);
+  Serial.print("Start Position: ");
+  Serial.println(currentPosition);
+  while (!(readStatusword(nodeID) & FAULT_MASK)) {              // while there are no faults, keep repeating this process
+    moveToPosition(nodeID, currentPosition + homingIncrement);  // move the motor to next position
+    currentPosition += homingIncrement;                         // update the currentPosition variable
+    Serial.print("Current Position: ");
+    Serial.println(currentPosition);
+    Serial.print("True Position: ");
+    Serial.println(readMotorPositionSDO(nodeID));
+    writeControlwordSDO(nodeID, NEW_POSITION);  // Prepare the system to accept a new position
+    delay(200);
+  };
+
+  // This code is reached once the fault takes place
+  handleFollowingError(nodeID, readMotorPositionSDO(nodeID));  // deal with the fault by clearing it, and assigning a new Home position
+}
+
+// An experimental very fast Homing Sequence I could never quite get working, the idea was to give it an impossibly far position to go to in a single movement
+void homingSequenceFast(uint8_t nodeID) {
+  int8_t currentMode = readModeOfOperationSDO(nodeID);  // read the current mode of operation
+  delay(500);
+  uint16_t statuswordCurrent = readStatusword(nodeID);
+  int32_t currentPosition = readMotorPositionSDO(nodeID);
+  Serial.print("Start Position: ");
+  Serial.println(currentPosition);
+  while (!(readStatusword(nodeID) & FAULT_MASK)) {
+    moveToPosition(nodeID, 140000);  // move impossibly far in the positive direction
+    Serial.print("Current Position: ");
+    Serial.println(currentPosition);
+    Serial.print("True Position: ");
+    Serial.println(readMotorPositionSDO(nodeID));
+    delay(3000);
+  }
+  // This code is reached once the fault takes place
+  //handleFollowingError(nodeID, currentPosition);  // deal with the fault by clearing it, and assigning a new Home position
+  handleFollowingError(nodeID, readMotorPositionSDO(nodeID));  // deal with the fault by clearing it, and assigning a new Home position
+}
+
+// SDO Function to actually move the motor into position, PDO equivalent doesn't exist because Cyclic Synchronous Position Mode doesn't need manual updates to move
+void moveToPosition(uint8_t nodeID, uint32_t position) {
+
+  writeTargetPositionSDO(nodeID, position);  // write the desired target position to the motor
+
+  int32_t targetPosition = readTargetPositionSDO(nodeID);  // read the target position
+
+  // Read the current status of the motor to determine the necessary Controlword command
+  uint16_t status = readStatusword(nodeID);
+
+  // Actually send the control word to the motor, this should make the motor move
+  writeControlwordSDO(nodeID, ABSOLUTE_POSITION_IMMEDIATE);
+  delay(50);
+}
+
+
+///// Check if used or not
 
 uint16_t readErrorCode(uint8_t nodeID) {
   // Prepare SDO upload request to read error code from object 0x603F
@@ -634,242 +948,4 @@ bool waitForErrorCodeResponse(uint8_t nodeID, CAN_message_t& inMsg) {
     }
   }
   return false;  // Timeout reached, no response
-}
-
-void cleanErrorState(uint8_t nodeID) {
-  writeControlword(nodeID, 0x0000);       // Transition to the "Switched on disabled" state if necessary
-  writeControlword(nodeID, FAULT_RESET);  // Set bit 7 in the Controlword to reset the fault
-  delay(100);                             // Small delay to ensure the command is processed
-  writeControlword(nodeID, 0x0000);       // Clear bit 7 in the Controlword to complete the fault reset procedure
-  delay(100);                             // Small delay to ensure the command is processed
-
-  // Confirm that the error is cleared by checking the Statusword
-  uint16_t statusword = readStatusword(nodeID);
-  if (!(statusword & 0x0008)) {  // Bit 3 (0x08) is the fault bit in Statusword
-    Serial.println("Fault reset successful!");
-    writeControlword(nodeID, SWITCH_ON_AND_ENABLE_OPERATION);  // Enable all  the motor again
-    delay(100);                                                // Delay to ensure command is processed
-  } else {
-    Serial.println("Fault reset failed. Fault still present.");
-  }
-}
-
-bool handleFollowingError(uint8_t nodeID, int32_t currentPosition) {
-  // Check the drive's status to determine if a following error has occurred
-  uint16_t statusword = readStatusword(nodeID);
-  if (statusword & FAULT_MASK) {
-    Serial.println("Following error detected, handling error.");
-
-    cleanErrorState(nodeID);  // Attempt to clear the error
-
-    // Read the status word again to check if the error has been cleared
-    statusword = readStatusword(nodeID);
-    if (statusword & FAULT_MASK) {
-      Serial.println("Failed to clear the following error.");
-      return false;  // the error was not handled correctly
-    }
-
-    if (!setHomePosition(nodeID, currentPosition - 2000)) {  // Then, update 2000 increments in from the current position to be the new Zero (Home) Position
-      return false;                                          // tell the system that the reset of home was unsuccessful
-    }
-    return true;  // if it all went fine, return success
-  } else {        // if no error was detected
-    Serial.println("No following error detected.");
-    return true;
-  }
-}
-
-// Function to set the Home position
-bool setHomePosition(uint8_t nodeID, int32_t currentPosition) {
-  uint8_t sdoWriteCommand[8] = {
-    0x23,                                       // Command specifier for writing 4 bytes (0x23 for 32-bit, 0x2B for 16-bit, 0x2F for 8-bit)
-    (uint8_t)(HOME_POSITION_INDEX & 0xFF),      // Index LowByte
-    (uint8_t)(HOME_POSITION_INDEX >> 8),        // Index HighByte
-    HOME_POSITION_SUBINDEX,                     // Subindex
-    (uint8_t)(currentPosition & 0xFF),          // Data LowByte
-    (uint8_t)((currentPosition >> 8) & 0xFF),   // Data Low MidByte
-    (uint8_t)((currentPosition >> 16) & 0xFF),  // Data High MidByte
-    (uint8_t)(currentPosition >> 24)            // Data HighByte
-  };
-
-  CAN_message_t outMsg;
-  outMsg.id = SDO_CLIENT_TO_SERVER_BASE + nodeID;  // Add the node ID to the base Rx SDO ID
-  outMsg.len = 8;
-  memcpy(outMsg.buf, sdoWriteCommand, 8);
-
-  if (Can1.write(outMsg)) {
-    Serial.print("Home position set for motor with Node-ID: ");
-    Serial.println(nodeID);
-    return true;  // Success
-  } else {
-    Serial.print("Failed to set home position for motor with Node-ID: ");
-    Serial.println(nodeID);
-    return false;  // Failure
-  }
-}
-
-void homingSequence(uint8_t nodeID) {
-  // Set the correct mode, in this case Profile Position Mode makes the most sense.
-  setModeOfOperation(nodeID, PROFILE_POSITION_MODE);
-  Serial.print("PROFILE POSITION MODE requested on Motor ");
-  Serial.println(nodeID);
-  delay(200);                                        // Short delay to ensure motor is in correct mode
-  int8_t currentMode = readModeOfOperation(nodeID);  // read the current mode of operation
-  delay(200);
-  uint16_t statuswordCurrent = readStatusword(nodeID);
-
-  // Command the motor to move slowly in the positive direction
-  //int32_t currentPosition = 0;                            // all motors will start at zero as the encoder is relative
-  //int32_t currentPosition = readMotorPositionPDO(nodeID); // read the current position
-  int32_t currentPosition = readMotorPositionSDO(nodeID);
-  Serial.print("Start Position: ");
-  Serial.println(currentPosition);
-  while (!(readStatusword(nodeID) & FAULT_MASK)) {              // while there are no faults, keep repeating this process
-    moveToPosition(nodeID, currentPosition + homingIncrement);  // move the motor to next position
-    delay(500);                                                 // short delay to ensure movement took place
-    currentPosition += homingIncrement;                         // update the currentPosition variable
-    Serial.print("Current Position: ");
-    Serial.println(currentPosition);
-  };
-
-  // This code is reached once the fault takes place
-  handleFollowingError(nodeID, currentPosition);  // deal with the fault by clearing it, and assigning a new Home position
-}
-
-void loop() {
-  static unsigned long lastSyncTime = 0;
-  unsigned long currentTime = millis();
-
-  if (currentTime - lastSyncTime >= syncPeriod) {
-    lastSyncTime = currentTime;  // Update the last sync time
-
-    // Create a CAN message for the SYNC
-    CAN_message_t syncMsg;
-    syncMsg.id = SYNC_COB_ID;
-    syncMsg.len = 0;  // SYNC messages have no data
-
-    // Send the SYNC message
-    if (!Can1.write(syncMsg)) {  // if the SYNC fails
-      Serial.println("SYNC failed.");
-    }
-  }
-}
-
-///// Old Loop Code Start
-// CAN_message_t inMsg;
-// if (Can1.read(inMsg)) {
-//   if (inMsg.id == (SDO_SERVER_TO_CLIENT_BASE + THUMB)) {
-//     Serial.println("Received SDO response from Thumb motor driver!");
-//     for (int i = 0; i < 8; i++) {
-//       Serial.print(inMsg.buf[i], HEX);
-//       Serial.print(" ");
-//     }
-//     Serial.println();
-//     // Process the response here
-//   }
-// }
-// msg.id = 0x123;          // A COB-ID
-// msg.flags.extended = 0;  // Standard Frame
-// msg.flags.remote = 0;    // Data frame, not remote frame
-// msg.leng = 8;            // Data length code
-
-// // Sample data
-// msg.buff[0] = 0x01;
-// msg.buff[1] = 0x02;
-// msg.buff[2] = 0x03;
-// msg.buff[3] = 0x04;
-// msg.buff[4] = 0x05;
-// msg.buff[5] = 0x06;
-// msg.buff[6] = 0x07;
-// msg.buff[7] = 0x08;
-
-// // Send message
-// Can1.write(msg);
-///// Old Loop Code End
-
-
-
-// Function to actually move the motor into position
-void moveToPosition(uint8_t nodeID, uint32_t position) {
-
-  writeTargetPositionSDO(nodeID, position);  // write the desired target position to the motor
-
-  int32_t targetPosition = readTargetPositionSDO(nodeID);  // read the target position
-
-  // Read the current status of the motor to determine the necessary Controlword command
-  uint16_t status = readStatusword(nodeID);
-
-  //uint16_t BIT_6_MASK = ~(1 << 6);  // Creates a bitmask with all bits set except for bit 6
-
-  // Construct the control word
-  // Bits are set as follows:
-  // Bit 2 (Quick stop) not set, Bit 4 (Start move) set, Bit 5 (Start immediately) set,
-  // Bit 6 (Move type) set according to the 'relative' parameter,
-  // Bit 8 (Pause) not set, Bit 9 (Start from standstill) not set
-  uint16_t controlword = (1 << 4) | (1 << 5);  // Start the move immediately
-  //controlword &= BIT_6_MASK;                   // Clear bit 6 to indicate absolute motion
-
-  // Transition to "Ready to Switch On"
-  writeControlword(nodeID, 0x0006);
-  delay(200);
-  Serial.println("Status after 'Ready to Switch On'");
-  status = readStatusword(nodeID);
-
-  // Transition to "Switched On"
-  writeControlword(nodeID, 0x0007);
-  delay(200);
-  Serial.println("Status after 'Switched On'");
-  status = readStatusword(nodeID);
-
-  // Transition to "Operation Enabled"
-  writeControlword(nodeID, 0x000F);
-  delay(200);
-  Serial.println("Status after 'Operation Enabled'");
-  status = readStatusword(nodeID);
-
-  // Actually send the control word to the motor, this should make the motor move
-  writeControlword(nodeID, controlword);
-  delay(200);
-  Serial.println("Status after final controlword");
-  status = readStatusword(nodeID);
-}
-
-///// Old moveToPosition code (without the writeControlWord implementation)
-// // Write the target position to the 'Target Position' object
-// uint8_t sdoWriteCommand[8] = {
-//   0x23,                                               // Command specifier for writing 4 bytes
-//   (uint8_t)(SDO_WRITE_TARGET_POSITION_INDEX & 0xFF),  // Index LowByte
-//   (uint8_t)(SDO_WRITE_TARGET_POSITION_INDEX >> 8),    // Index HighByte
-//   SDO_WRITE_TARGET_POSITION_SUBINDEX,                 // Subindex
-//   (uint8_t)(position & 0xFF),                         // Data LowByte
-//   (uint8_t)((position >> 8) & 0xFF),                  // Data Low MidByte
-//   (uint8_t)((position >> 16) & 0xFF),                 // Data High MidByte
-//   (uint8_t)(position >> 24)                           // Data HighByte
-// };
-
-// CAN_message_t outMsg;
-// outMsg.id = SDO_CLIENT_TO_SERVER_BASE + nodeID;  // Assuming this is the correct base for SDOs
-// outMsg.len = 8;
-// memcpy(outMsg.buf, sdoWriteCommand, 8);
-
-// if (Can1.write(outMsg)) {
-//   Serial.print("Move to position command sent for Node-ID ");
-//   Serial.print(nodeID);
-//   Serial.print(" to position ");
-//   Serial.println(position);
-// } else {
-//   Serial.print("Failed to send move to position command for Node-ID ");
-//   Serial.println(nodeID);
-//   return false;
-// }
-/////
-
-void onReceive(const CAN_message_t msg) {
-  Serial.print("Recieved CAN Message: ID=0x");
-  Serial.print(msg.id, HEX);
-  Serial.print(", Data=0x");
-  for (int i = 0; i < msg.len; i++) {
-    Serial.print(msg.buf[i], HEX);
-  }
-  Serial.println();
 }
